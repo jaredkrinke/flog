@@ -1,0 +1,21 @@
+#!/bin/sh
+
+echo 'binary'
+while read file; do
+	path=`echo "./$file" |sed -e 's:\(.*\)/[^/]*:\1:'`
+	echo "$path/" |(
+		dir=
+		while read -d'/' nextdir; do
+			if [ "$nextdir" != '.' ]; then
+				if [ -n "$dir" ]; then
+					dir="$dir/$nextdir"
+				else
+					dir="$nextdir"
+				fi
+				echo "mkdir $dir"
+			fi
+		done
+	)
+	echo "put '$file' '$file'"
+done
+echo "quit"

@@ -1,0 +1,235 @@
+#!/bin/sh
+
+att_escape() {
+	xet="${1//\&/&amp;}"
+	xet="${xet//\"/&quot;}"
+	xet="${xet//</&lt;}"
+	xet="${xet//>/&gt;}"
+	echo "$xet"
+}
+
+get_title() {
+	title="$1"
+	# Override title
+	if [ -e "$2/title" ]; then
+		title=$(cat "$2/title")
+	fi
+	echo "$title"
+}
+
+fs_escape() {
+	echo -n "$1" | tr -c '[:alnum:].' '-'|tr [A-Z] [a-z]
+}
+
+site_description=$(att_escape "$(cat description)")
+site_title=$(att_escape "$(cat title)")
+site_url="`cat url`"
+
+(
+mkdir data 2>&1 >/dev/null
+mkdir output 2>&1 >/dev/null
+) 2>&1 >/dev/null
+
+# Convert posts to XML files
+ls topics |while read topic; do
+	fs_topic=`fs_escape "$topic"`
+	(
+	mkdir "data/$topic" 2>&1 >/dev/null
+	mkdir "output/$fs_topic" 2>&1 >/dev/null
+	mkdir "output/$fs_topic/images" 2>&1 >/dev/null
+	) 2>&1 >/dev/null
+
+	ls -t "topics/$topic" |while read post; do
+		# Find a way to compare it to all of the files in the dir, I think I did...
+		if [ "data/$topic/$post.xml" -ot "topics/$topic/$post/body" ]; then
+			(
+			dir="topics/$topic/$post"
+			title=$(get_title "$post" "$dir")
+
+			# Find out uri of this post, in case it was symlinked in
+			old_pwd="$PWD"
+			cd -P "topics/$topic/$post"
+			post_fs_title="$(fs_escape "$(echo "$PWD" |sed -e 's:.*/\([^/]*\)$:\1:')")"
+			cd ..
+			post_fs_topic="$(fs_escape "$(echo "$PWD" |sed -e 's:.*/\([^/]*\)$:\1:')")"
+			cd ../..
+			post_site_url="`cat url`"
+			uri="$post_site_url""$post_fs_topic/$post_fs_title.html"
+			cd "$old_pwd"
+		
+			att_title=$(att_escape "$title")
+			date_modified="`find "$dir/body" -maxdepth 0 -printf '%t %TZ'`"
+			timestamp=$(date -d "$date_modified" -u '+%Y-%m-%dT%H:%MZ')
+#			touch -d "$date_modified" "$dir"
+			fs_title=`fs_escape "$title"`
+			summary="$(att_escape "$(cat "topics/$topic/$post/body" |head -c 150)")"
+			echo "	<post topic=\"$topic\" safetopic=\"$fs_topic\" title=\"$att_title\" safetitle=\"$fs_title\" timestamp=\"$timestamp\" uri=\"$uri\" summary=\"$summary\">"
+		
+			# Process post contents
+			ls "$dir" |while read file; do
+				path="$dir/$file"
+				type=$(file "$path")
+				if [ "$file" = title ]; then
+					# Already taken care of
+					do_nothing=
+				elif [ -n "$(echo "$type" |grep image)" ]; then
+					# Image
+					file_pre=`expr match "$file" '\(.*\)\.'`
+					file_ext=`expr match "$file" '.*\.\([a-z0-9A-Z]*\)$'`
+					fs_file=`fs_escape "$file"`
+					fs_file_pre=`expr match "$fs_file" '\(.*\)\.'`
+	
+					mkdir "output/$fs_topic/images/$fs_title" 2>&1 >/dev/null
+					out_file="output/$fs_topic/images/$fs_title/$fs_file_pre.jpg"
+					if [ "$file_ext" = jpg ]; then
+						cp "$path" "$out_file"
+					else
+						convert "$path" "$out_file"
+					fi
+					out_thumb="output/$fs_topic/images/$fs_title/$fs_file_pre""_thumb.jpg"
+					cp "$out_file" "$out_thumb"
+					mogrify -size 150x150 -resize 150x150 "$out_thumb"
+	
+	
+					caption="$(cat "$dir/$file_pre.caption" 2>/dev/null)" # Caption
+					if [ -n "$caption" ]; then
+						caption="caption=\"$caption\""
+					fi
+					echo "		<image file=\"$fs_topic/images/$fs_title/$fs_file_pre.jpg\" thumb=\"$fs_topic/images/$fs_title/$fs_file_pre""_thumb.jpg\" $caption/>"
+				elif [ "${file%.caption}" != "$file" ]; then
+					# Captions handled with the images
+					do_nothing=
+				elif [ "${file%.xml}" != "$file" ]; then
+					# .xml files are just added verbatim to the post XML
+					cat "$file"
+				elif [ "$file" = body ]; then
+					# Wiki processing
+					echo "		<body><![CDATA["
+					# Linkage: -e 's:{\([^@]*\)@\([^}]*\)}:<a href="\2">\1</a>:g'
+					cat "$path" |cat "${0/%flog/links.m4}" - |m4 -P  | sed -e 's:[*]\(.*\)[*]:<em>\1</em>:g' \
+						-e 's:\(^[^-|%=].*\):<p>\1</p>:' \
+						-e 's:^=\(.*\):<h3>\1</h3>:' \
+						|sed -e ':top
+							/^-/{
+							s:-\(.*\):<ul><li>\1</li></ul>:
+							:mid
+							N
+							s:</ul>\n-\(.*\):\n<li>\1</li></ul>:
+							t mid
+							}
+							' \
+						|sed -e ':top
+							/^[|]/{
+							s:[|]\(.*\):<blockquote><p>\1</p></blockquote>:
+							:mid
+							N
+							s:</blockquote>\n[|]\(.*\):\n<p>\1</p></blockquote>:
+							t mid
+							}
+							' \
+						|sed -e ':top
+							/^[%]/{
+							s:[%]\(.*\):<code>\1<br/></code>:
+							:mid
+							N
+							s:</code>\n[%]\(.*\):\n\1<br/></code>:
+							t mid
+							}
+							' \
+
+					echo "		]]></body>"
+				elif [ "${file#rating}" != "$file" ]; then
+					# Rating
+					score=`cat "$dir/rating" |sed -r -e '/[^0-9/]/d' -e 's:^([0-9.]+)/?.*$:\1:'`
+					if [ -n "$(grep '/' "$dir/rating")" ]; then
+						maximum=`cat "$dir/rating" |grep '/' |sed -r -e '/[^0-9/]/d' -e 's:^.*/([0-9.]+)$:\1:'`
+					else
+						maximum=100
+					fi
+					rating_category=$(cat "$dir/rating" |grep '[^0-9/]')
+					if [ -z "$rating_category" ]; then
+						rating_category='Overall'
+					fi
+					echo "		<rating score=\"$score\" maximum=\"$maximum\" category=\"$rating_category\"/>"
+				elif [ -n "$(echo "$type" |grep text)" ]; then
+					# Other text, assume reference
+					cat "$path" |(while read line; do
+						if [ -n "$(echo "$line" |egrep '^[a-zA-Z\-]+:')" ]; then
+							ref_uri="$line"
+						else
+							ref_label="$line"
+						fi
+					done
+					if [ -z "$ref_label" ]; then
+						ref_label="$file"
+					fi
+					echo "		<reference uri=\"$ref_uri\" label=\"$ref_label\"/>"
+					)
+				fi
+			done
+		
+			echo "	</post>"
+			) > "data/$topic/$post.xml"
+			touch -d "$(find "topics/$topic/$post/body" -maxdepth 0 -printf '%t %TZ')" "data/$topic/$post.xml"
+			echo "Output data/$topic/$post.xml"
+		fi
+	done
+done
+
+# Copy extra
+find extra -type d |while read dir; do
+	( mkdir "${dir/#extra/output}" 2>&1 >/dev/null ) 2>&1 >/dev/null
+done
+find extra -type f |while read file; do
+	cp "$file" "${file/#extra/output}"
+done
+
+# Archive
+(
+echo "<log title=\"$site_title\" description=\"$site_description\" link=\"$site_url\">"
+
+ls -td data/*/*.xml |while read file; do
+	cat "$file"
+done
+
+echo "</log>"
+) > data/archive.xml
+echo "Output data/archive.xml"
+
+# output index page
+xsltproc post.xsl data/archive.xml >"output/index.html"
+echo "Output output/index.html"
+xsltproc --stringparam archive 'yes' post.xsl data/archive.xml >"output/archive.html"
+echo "Output output/archive.html"
+xsltproc "${0/%flog/xml2rss10.xsl}" data/archive.xml >"output/index.rdf"
+echo "Output output/index.rdf"
+
+# Generate each output page
+ls topics |while read topic; do
+	old_pwd="$PWD"
+	cd -P "topics/$topic"
+	cd ../..
+	topic_site_url="`cat url`"
+	cd "$old_pwd"
+
+	if [ "$site_url" = "$topic_site_url" ]; then
+		fs_topic=`fs_escape "$topic"`
+	
+		xsltproc --stringparam dir_prefix '../' --stringparam topic "$topic" post.xsl data/archive.xml >"output/$fs_topic/index.html"
+		echo "Output output/$fs_topic/index.html"
+		xsltproc --stringparam topic "$topic" "${0/%flog/xml2rss10.xsl}" data/archive.xml >"output/$fs_topic/index.rdf"
+		echo "Output output/$fs_topic/index.rdf"
+		xsltproc --stringparam archive 'yes' --stringparam topic "$topic" --stringparam dir_prefix '../' post.xsl data/archive.xml >"output/$fs_topic/archive.html"
+		echo "Output output/$fs_topic/archive.html"
+	
+		ls "topics/$topic" |while read post; do
+			dir="topics/$topic/$post"
+			title=$(get_title "$post" "$dir")
+		
+			fs_title=`fs_escape "$title"`
+	
+			xsltproc --stringparam dir_prefix '../' --stringparam topic "$topic" --stringparam title "$title" post.xsl data/archive.xml >"output/$fs_topic/$fs_title.html"
+			echo "Output output/$fs_topic/$fs_title.html"
+		done
+	fi
+done

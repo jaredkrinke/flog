@@ -1,0 +1,25 @@
+#!/bin/sh
+
+while read file; do
+	if [ -f "$file" ]; then
+	update=0
+	if [ -f .stamps/"$file" ]; then
+		if [ "$file" -nt .stamps/"$file" ]; then
+			if diff -q .stamps/"$file" "$file" 2>&1 >/dev/null; then
+				touch .stamps/"$file"
+			else
+				update=1
+			fi
+		fi
+	else
+		update=1
+	fi
+
+	if [ $update -gt 0 ]; then
+		echo "$file"
+		path=`echo "./$file" |sed -e 's:\(.*\)/[^/]*:\1:'`
+		mkdir -p .stamps/"$path"
+		cp "$file" .stamps/"$file"
+	fi
+	fi
+done
